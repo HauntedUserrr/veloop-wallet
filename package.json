@@ -1,0 +1,18 @@
+{
+  "name": "veloop-wallet-demo",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12" },
+  "workspaces": ["backend", "frontend"],
+  "scripts": {
+    "dev": "concurrently -k -n api,web \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w frontend",
+    "start": "npm start -w backend",
+    "seed": "npm run seed -w backend",
+    "test": "npm test -w backend",
+    "mongo:local": "npm run mongo:local -w backend",
+    "admin:rotate-password": "npm run admin:rotate-password -w backend",
+    "demo:cleanup": "npm run demo:cleanup -w backend --"
+  },
+  "devDependencies": { "concurrently": "^9.2.1" }
+}
