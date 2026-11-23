@@ -18,7 +18,6 @@ The remaining tests cover transaction rollback, refund headroom, exchange dedupl
 
 ## Browser verification
 
-- The final build passed Edge checks at 320px and 1366px. The sign-in screen showed only the configured access option, and the payout form showed only eligible methods. Earlier checks also covered keyboard confirmation, insufficient balance, pagination, and sign-out.
-- The ₹100 walkthrough posted a 19,500 VE debit, showed a pending receipt, and left 5,500 VEs. Approval kept that balance. Rejection restored 25,000 VEs and showed the recorded reason.
-- Interrupted submissions recovered the committed receipt after reload. A retry with changed details failed, and discarding an uncommitted request prevented a later debit.
-- After the layout change, the production build passed at 320px and 1366px. The ledger table fit the viewport, pagination worked, and a ₹100 withdrawal posted the debit and refreshed the balance.
+- At 320px and 1366px, the wallet and ledger fit the viewport. Sign-in showed only configured options, the payout form showed eligible methods, and ledger pagination worked.
+- A ₹100 withdrawal posted a 19,500 VE debit, showed a pending receipt, and left 5,500 VEs. Approval kept that balance. Rejection restored 25,000 VEs and showed the reason.
+- After a lost response, reloading recovered the receipt. The app rejected changed retry details, and discarding an uncommitted request prevented a later debit.

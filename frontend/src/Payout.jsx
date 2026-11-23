@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { request } from './api.js';
-import { currencyNames, ErrorMessage, formatDate, Loading, money, number, Pagination, Status, useApi } from './components.jsx';
+import {
+  abandonAttempt, completedWithdrawal, forgetAttempt, savedAttempts, shouldReloadCatalog, submitWithdrawal,
+} from './withdrawals.js';
+import {
+  currencyNames, ErrorMessage, formatDate, Loading, money, number, Pagination, Status, useApi,
+} from './components.jsx';
 
-const editableErrors = new Set(['INVALID_DETAILS', 'QUOTE_CHANGED', 'METHOD_UNAVAILABLE', 'OPTION_UNAVAILABLE', 'INELIGIBLE']);
 const sampleDestinations = {
   UPI_ID: { value: 'demo@sample', action: 'Use sample UPI ID' },
   EMAIL: { value: 'demo@example.test', action: 'Use sample email' },
@@ -12,14 +15,6 @@ const emptySelection = { method: '', option: '', detail: '' };
 
 function credits(amount, currency) {
   return `${number.format(amount)} ${currencyNames[currency]}`;
-}
-
-function savedAttempts(prefix) {
-  return Object.keys(sessionStorage).filter(storageKey => storageKey.startsWith(prefix)).map(storageKey => ({
-    storageKey,
-    optionId: storageKey.slice(prefix.length),
-    key: sessionStorage.getItem(storageKey),
-  })).filter(attempt => attempt.key);
 }
 
 function Confirmation({ attempt, busy, error, close, submit }) {
@@ -76,7 +71,7 @@ export default function Payout({ token, userId, isDemo }) {
   const retryKey = attempts.find(attempt => attempt.storageKey === storageKey)?.key;
   const blockedByEarlierAttempt = !retryKey && attempts.length > 0;
   const insufficient = option && !retryKey && available !== undefined && available < option.requiredAmount;
-  const canReview = option && !busy && !blockedByEarlierAttempt && !insufficient
+  const canReview = option && selection.detail.trim() && !busy && !blockedByEarlierAttempt && !insufficient
     && (available !== undefined || !!retryKey);
   const currentReceipt = receiptDetails.data?.withdrawal ?? receipt;
 
@@ -92,12 +87,6 @@ export default function Payout({ token, userId, isDemo }) {
       method, option, body, storageKey, retry: !!retryKey,
       key: retryKey ?? `wd1-${Date.now()}-${crypto.randomUUID()}`,
     });
-  }
-
-  function forgetAttempt(attempt) {
-    if (sessionStorage.getItem(attempt.storageKey) === attempt.key) {
-      sessionStorage.removeItem(attempt.storageKey);
-    }
   }
 
   function showReceipt(withdrawal, attempt) {
@@ -122,30 +111,12 @@ export default function Payout({ token, userId, isDemo }) {
     }
   }
 
-  async function completedWithdrawal(attempt) {
-    try {
-      const response = await request('/withdrawals/attempt', {
-        token, headers: { 'Idempotency-Key': attempt.key },
-      });
-      return response.withdrawal;
-    } catch (error) {
-      if (error.code === 'WITHDRAWAL_NOT_FOUND') return null;
-      throw error;
-    }
-  }
-
-  async function abandonAttempt(attempt) {
-    return request('/withdrawals/intents', {
-      token, method: 'DELETE', headers: { 'Idempotency-Key': attempt.key },
-    });
-  }
-
   function reviewAttempt(attempt, discard) {
     return runAction(async () => {
       setRecoveryFeedback(null);
       try {
         if (discard) {
-          const result = await abandonAttempt(attempt);
+          const result = await abandonAttempt(token, attempt);
           if (result.withdrawal) {
             showReceipt(result.withdrawal, attempt);
           } else if (result.abandoned) {
@@ -154,7 +125,7 @@ export default function Payout({ token, userId, isDemo }) {
           }
           return;
         }
-        const withdrawal = await completedWithdrawal(attempt);
+        const withdrawal = await completedWithdrawal(token, attempt);
         if (withdrawal) showReceipt(withdrawal, attempt);
         else setRecoveryFeedback('No receipt yet. Retry with the original details or discard the attempt.');
       } catch (error) {
@@ -166,49 +137,12 @@ export default function Payout({ token, userId, isDemo }) {
   function submit() {
     return runAction(async () => {
       const attempt = confirmation;
-      const headers = { 'Idempotency-Key': attempt.key };
       setError(null);
       setRecoveryFeedback(null);
-      let debitRequested = false;
       try {
-        const storedKey = sessionStorage.getItem(attempt.storageKey);
-        if (storedKey && storedKey !== attempt.key) {
-          throw Object.assign(new Error('Review the previously saved withdrawal attempt first.'), { status: 409 });
-        }
-        if (storedKey) {
-          const withdrawal = await completedWithdrawal(attempt);
-          if (withdrawal) {
-            showReceipt(withdrawal, attempt);
-            return;
-          }
-        }
-        sessionStorage.setItem(attempt.storageKey, attempt.key);
-        const submission = { token, method: 'POST', body: attempt.body, headers };
-        await request('/withdrawals/intents', submission);
-        debitRequested = true;
-        const result = await request('/withdrawals', submission);
-        showReceipt(result.withdrawal, attempt);
+        showReceipt(await submitWithdrawal(token, attempt), attempt);
       } catch (error) {
-        try {
-          if (error.code === 'IDEMPOTENCY_CONFLICT') {
-            const withdrawal = await completedWithdrawal(attempt);
-            if (withdrawal) {
-              showReceipt(withdrawal, attempt);
-              return;
-            }
-          }
-          if (!attempt.retry && !debitRequested && editableErrors.has(error.code)) {
-            const result = await abandonAttempt(attempt);
-            if (result.withdrawal) {
-              showReceipt(result.withdrawal, attempt);
-              return;
-            }
-            if (result.abandoned) forgetAttempt(attempt);
-          }
-        } catch {
-          // Keep the key so the request can still be resolved from its receipt.
-        }
-        if (editableErrors.has(error.code) && error.code !== 'INVALID_DETAILS') catalog.reload();
+        if (shouldReloadCatalog(error)) catalog.reload();
         if (error.code === 'INSUFFICIENT_BALANCE') balance.reload();
         setError(error);
       }

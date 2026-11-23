@@ -58,13 +58,11 @@ export async function listOptions(user, methodId, { includeOptions = true } = {}
   }));
 }
 
-function normalizedDetail(type, value) {
+function validateDestination(type, detail) {
   const schema = type === 'UPI_ID'
     ? z.string().regex(/^[a-z0-9][a-z0-9._-]{1,127}@[a-z0-9][a-z0-9.-]{1,63}$/)
     : z.email();
-  const detail = value.trim().toLowerCase();
   if (!schema.safeParse(detail).success) fail(422, 'INVALID_DETAILS', 'Enter valid payout details for this method.');
-  return detail;
 }
 
 function encrypt(detail, key, id) {
@@ -75,7 +73,7 @@ function encrypt(detail, key, id) {
   return [iv, cipher.getAuthTag(), ciphertext].map(part => part.toString('base64url')).join('.');
 }
 
-export function publicWithdrawal(record) {
+function publicWithdrawal(record) {
   const { _id, userId, method, methodName, optionId, currency, currencyAmount,
     payoutMinor, payoutCurrency, status, transactionId, refundTransactionId,
     requestedAt, processedAt, updatedAt, rejectionReason } = record;
@@ -151,8 +149,8 @@ async function validatePayout(userId, body, detail, session = null) {
   if (option.requiredAmount !== body.expectedRequiredAmount || option.payoutMinor !== body.expectedPayoutMinor) {
     fail(409, 'QUOTE_CHANGED', 'The payout price changed. Refresh the options and confirm again.');
   }
-  const destination = normalizedDetail(method.detailType, detail);
-  return { user, method, option, destination };
+  validateDestination(method.detailType, detail);
+  return { user, method, option };
 }
 
 export async function prepareWithdrawal(userId, body, idempotencyKey, config) {
@@ -198,9 +196,9 @@ export async function createWithdrawal(userId, body, idempotencyKey, config) {
         lookup, { $inc: { lockVersion: 1 } }, { session, returnDocument: 'after' },
       ).select('+requestHash').lean();
       assertOpenIntent(intent, requestHash);
-      const { user, method, option, destination } = await validatePayout(userId, body, detail, session);
+      const { user, method, option } = await validatePayout(userId, body, detail, session);
       const id = new mongoose.Types.ObjectId();
-      const payoutDetails = encrypt(user.demo ? 'sandbox' : destination, config.payoutKey, id);
+      const payoutDetails = encrypt(user.demo ? 'sandbox' : detail, config.payoutKey, id);
       const transaction = await postEntry({
         userId, currency: option.currency, type: 'DEBIT', amount: option.requiredAmount,
         source: 'WITHDRAWAL', referenceId: String(id), description: `${method.name} redemption`,
