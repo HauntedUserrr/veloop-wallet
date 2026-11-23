@@ -1,0 +1,13 @@
+{
+  "name": "veloop-wallet",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12" },
+  "workspaces": ["backend"],
+  "scripts": {
+    "dev": "npm run dev -w backend",
+    "start": "npm start -w backend",
+    "mongo:local": "npm run mongo:local -w backend",
+    "test": "npm test -w backend"
+  }
+}
