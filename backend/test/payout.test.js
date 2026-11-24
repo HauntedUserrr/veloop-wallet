@@ -1,0 +1,166 @@
+import assert from 'node:assert/strict';
+import { createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
+import { after, before, test } from 'node:test';
+import mongoose from 'mongoose';
+import { MongoMemoryReplSet } from 'mongodb-memory-server';
+import request from 'supertest';
+import { createApp } from '../src/app.js';
+import { connectDatabase, Ledger, PayoutOption, Wallet, Withdrawal, WithdrawalEvent } from '../src/models.js';
+import { seedPayoutOptions } from '../src/payout.js';
+
+const payoutKey = randomBytes(32);
+const reviewerToken = randomBytes(32).toString('hex');
+const api = request(createApp({ jwtSecret: randomBytes(32).toString('hex'), payoutKey, reviewerToken, demoEnabled: true }));
+const details = { optionId: 'upi_100', upiId: 'review@sample', quotedCost: 19500 };
+let mongo;
+
+before(async () => {
+  mongo = await MongoMemoryReplSet.create({
+    binary: { version: '8.0.12' }, replSet: { count: 1, storageEngine: 'wiredTiger' },
+  });
+  await connectDatabase(mongo.getUri('payout_tests'));
+  await seedPayoutOptions();
+});
+
+after(async () => {
+  await mongoose.disconnect();
+  await mongo?.stop();
+});
+
+async function demo() {
+  return (await api.post('/api/auth/demo').expect(201)).body;
+}
+
+function submit(session, body = details, key = randomUUID()) {
+  return api.post('/api/withdrawals').auth(session.token, { type: 'bearer' })
+    .set('Idempotency-Key', key).send(body);
+}
+
+async function balance(session) {
+  return (await Wallet.findById(session.user.id).lean()).balances.ves;
+}
+
+test('uses the database catalog for available options and preserves configured values on reseed', async () => {
+  const session = await demo();
+  await api.get('/api/payout/options').expect(401);
+  await PayoutOption.updateOne({ _id: 'upi_10' }, { cost: 2500, active: false });
+  try {
+    await seedPayoutOptions();
+    const { body } = await api.get('/api/payout/options').auth(session.token, { type: 'bearer' }).expect(200);
+    assert.equal(body.options.length, 7);
+    assert.equal(body.options.find(option => option.id === 'upi_100').cost, 19500);
+    assert.equal((await PayoutOption.findById('upi_10')).cost, 2500);
+    await submit(session, { optionId: 'upi_10', upiId: details.upiId }).expect(422);
+  } finally {
+    await PayoutOption.updateOne({ _id: 'upi_10' }, { cost: 2400, active: true });
+  }
+});
+
+test('creates the pending withdrawal, linked debit and new balance together', async () => {
+  const session = await demo();
+  const { body: { withdrawal } } = await submit(session).expect(201);
+  assert.equal(withdrawal.status, 'PENDING');
+  assert.equal(withdrawal.amountPaise, 10000);
+  assert.equal(await balance(session), 5500);
+  const entry = await Ledger.findById(withdrawal.ledgerId);
+  assert.deepEqual([entry.type, entry.amount, entry.balanceBefore, entry.balanceAfter], ['DEBIT', 19500, 25000, 5500]);
+  assert.equal(String(entry.withdrawalId), withdrawal.id);
+  assert.equal(withdrawal.encryptedDestination, undefined);
+  const dbRecord = await Withdrawal.findById(withdrawal.id).select('+encryptedDestination');
+  const [iv, tag, ciphertext] = dbRecord.encryptedDestination.split('.').map(part => Buffer.from(part, 'base64url'));
+  const decipher = createDecipheriv('aes-256-gcm', payoutKey, iv);
+  decipher.setAAD(Buffer.from(withdrawal.id));
+  decipher.setAuthTag(tag);
+  assert.equal(Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString(), details.upiId);
+});
+
+test('deducts once for concurrent retries and rejects changed details under the same key', async () => {
+  const session = await demo();
+  const key = randomUUID();
+  const responses = await Promise.all([submit(session, details, key), submit(session, details, key)]);
+  assert.deepEqual(responses.map(response => response.status).sort(), [200, 201]);
+  assert.equal(responses[0].body.withdrawal.id, responses[1].body.withdrawal.id);
+  await submit(session, { ...details, upiId: 'different@sample' }, key).expect(409);
+  assert.equal(await balance(session), 5500);
+  assert.equal(await Ledger.countDocuments({ userId: session.user.id, type: 'DEBIT' }), 1);
+  assert.equal(await Withdrawal.countDocuments({ userId: session.user.id }), 1);
+});
+
+test('prevents overspending from separate concurrent withdrawals', async () => {
+  const session = await demo();
+  const responses = await Promise.all([submit(session), submit(session)]);
+  assert.deepEqual(responses.map(response => response.status).sort(), [201, 409]);
+  assert.equal(responses.find(response => response.status === 409).body.code, 'INSUFFICIENT_BALANCE');
+  assert.equal(await balance(session), 5500);
+  assert.equal(await Ledger.countDocuments({ userId: session.user.id, type: 'DEBIT' }), 1);
+  assert.equal(await Withdrawal.countDocuments({ userId: session.user.id }), 1);
+});
+
+test('rejects overridden prices, stale quotes, invalid destinations and missing keys', async () => {
+  const session = await demo();
+  await submit(session, { ...details, amount: 1 }).expect(422);
+  const changed = await submit(session, { ...details, quotedCost: 1 }).expect(409);
+  assert.equal(changed.body.code, 'QUOTE_CHANGED');
+  await submit(session, { ...details, upiId: 'bad' }).expect(422);
+  await api.post('/api/withdrawals').auth(session.token, { type: 'bearer' }).send(details).expect(422);
+  await api.post('/api/withdrawals').auth(session.token, { type: 'bearer' })
+    .set('Content-Type', 'application/json').send('{').expect(400);
+  assert.equal(await balance(session), 25000);
+  assert.equal(await Withdrawal.countDocuments({ userId: session.user.id }), 0);
+});
+
+test('requires reviewer access and refunds a rejected withdrawal exactly once', async () => {
+  const session = await demo();
+  const { body: { withdrawal } } = await submit(session).expect(201);
+  const route = `/api/admin/withdrawals/${withdrawal.id}`;
+  const decision = { status: 'REJECTED', reason: 'Demo review' };
+  await api.patch(route).auth(session.token, { type: 'bearer' }).send(decision).expect(403);
+  const reject = () => api.patch(route).auth(reviewerToken, { type: 'bearer' }).send(decision).expect(200);
+  const [first, second] = await Promise.all([reject(), reject()]);
+  assert.equal(first.body.withdrawal.status, 'REJECTED');
+  assert.equal(first.body.withdrawal.refundLedgerId, second.body.withdrawal.refundLedgerId);
+  assert.equal(await balance(session), 25000);
+  assert.equal(await Ledger.countDocuments({ withdrawalId: withdrawal.id, type: 'CREDIT' }), 1);
+  assert.equal(await WithdrawalEvent.countDocuments({ withdrawalId: withdrawal.id, to: 'REJECTED' }), 1);
+});
+
+test('approves a processing withdrawal without returning the debit', async () => {
+  const session = await demo();
+  const { body: { withdrawal } } = await submit(session).expect(201);
+  const review = status => api.patch(`/api/admin/withdrawals/${withdrawal.id}`)
+    .auth(reviewerToken, { type: 'bearer' }).send({ status });
+  await review('APPROVED').expect(409);
+  await review('PROCESSING').expect(200);
+  const result = await review('APPROVED').expect(200);
+  assert.equal(result.body.withdrawal.status, 'APPROVED');
+  assert.equal(await balance(session), 5500);
+  assert.equal(await Ledger.countDocuments({ withdrawalId: withdrawal.id, type: 'CREDIT' }), 0);
+});
+
+test('keeps withdrawal records and their destinations private', async () => {
+  const owner = await demo();
+  const outsider = await demo();
+  const { body: { withdrawal } } = await submit(owner).expect(201);
+  const route = `/api/withdrawals/${withdrawal.id}`;
+  await api.get(route).auth(outsider.token, { type: 'bearer' }).expect(404);
+  const history = await api.get('/api/withdrawals').auth(outsider.token, { type: 'bearer' }).expect(200);
+  assert.deepEqual(history.body.records, []);
+  const record = await api.get(route).auth(owner.token, { type: 'bearer' }).expect(200);
+  assert.equal(record.body.withdrawal.encryptedDestination, undefined);
+  assert.equal(record.body.withdrawal.requestFingerprint, undefined);
+  assert.equal(record.body.withdrawal.idempotencyKey, undefined);
+});
+
+test('rolls back the balance and ledger when saving the pending request fails', async () => {
+  const session = await demo();
+  const original = Withdrawal.create;
+  Withdrawal.create = async () => { throw new Error('Simulated write failure'); };
+  try {
+    await submit(session).expect(500);
+  } finally {
+    Withdrawal.create = original;
+  }
+  assert.equal(await balance(session), 25000);
+  assert.equal(await Ledger.countDocuments({ userId: session.user.id, type: 'DEBIT' }), 0);
+  assert.equal(await Withdrawal.countDocuments({ userId: session.user.id }), 0);
+});

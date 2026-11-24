@@ -1,0 +1,278 @@
+{
+  "info": {
+    "name": "VELoop wallet and withdrawal review",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:4001"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "withdrawalKey",
+      "value": ""
+    },
+    {
+      "key": "withdrawalId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/api/health"
+      }
+    },
+    {
+      "name": "Start demo",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/api/auth/demo"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.response.to.have.status(201);",
+              "pm.collectionVariables.set('token', pm.response.json().token);",
+              "pm.collectionVariables.set('withdrawalKey', pm.variables.replaceIn('{{$guid}}'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get payout options",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/payout/options"
+      }
+    },
+    {
+      "name": "Request ₹100 UPI payout",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "{{withdrawalKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/api/withdrawals",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"optionId\": \"upi_100\",\n  \"upiId\": \"review@sample\",\n  \"quotedCost\": 19500\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+              "pm.collectionVariables.set('withdrawalId', pm.response.json().withdrawal.id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Retry the same withdrawal",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "{{withdrawalKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/api/withdrawals",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"optionId\": \"upi_100\",\n  \"upiId\": \"review@sample\",\n  \"quotedCost\": 19500\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.response.to.have.status(200);",
+              "pm.expect(pm.response.json().withdrawal.id).to.equal(pm.collectionVariables.get('withdrawalId'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get wallet",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/wallet"
+      }
+    },
+    {
+      "name": "Get ledger",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/wallet/transactions"
+      }
+    },
+    {
+      "name": "Get withdrawal",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/withdrawals/{{withdrawalId}}"
+      }
+    },
+    {
+      "name": "Get withdrawal history",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/withdrawals"
+      }
+    },
+    {
+      "name": "Optional reviewer action",
+      "description": "Set reviewerToken in a private Postman environment only if the service has a reviewer token configured.",
+      "item": [
+        {
+          "name": "Reject and refund",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{reviewerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/withdrawals/{{withdrawalId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"REJECTED\",\n  \"reason\": \"Demo review\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
