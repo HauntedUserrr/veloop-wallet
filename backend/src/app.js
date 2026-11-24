@@ -6,6 +6,7 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { User, Wallet, Withdrawal } from './models.js';
 import { PayoutError, payoutOptions, reviewWithdrawal, submitWithdrawal, withdrawalView } from './payout.js';
+import { adjustWallet } from './adjustment.js';
 import { createDemoWallet, listTransactions } from './wallet.js';
 
 const issuer = 'veloop-wallet';
@@ -26,12 +27,23 @@ function bearer(req) {
   return req.get('Authorization')?.match(/^Bearer ([^\s]+)$/i)?.[1];
 }
 
-export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = false }) {
+export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = false, clientOrigin, trustProxy = 0 }) {
   const app = express();
   app.disable('x-powered-by');
+  if (trustProxy) app.set('trust proxy', trustProxy);
   app.use(helmet());
-  app.use('/api', (_req, res, next) => {
+  app.use('/api', (req, res, next) => {
     res.set('Cache-Control', 'no-store');
+    const origin = req.get('Origin');
+    res.vary('Origin');
+    if (clientOrigin && origin === clientOrigin) {
+      res.set('Access-Control-Allow-Origin', origin);
+      if (req.method === 'OPTIONS') {
+        res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, Idempotency-Key');
+        return res.sendStatus(204);
+      }
+    }
     next();
   });
 
@@ -111,6 +123,16 @@ export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = f
     res.json({ records: records.slice(0, limit).map(withdrawalView), page, limit, hasMore: page < 500 && records.length > limit });
   });
 
+  app.get('/api/withdrawals/attempt', async (req, res) => {
+    const idempotencyKey = req.get('Idempotency-Key');
+    if (!idempotencyKey || !/^[a-zA-Z0-9_-]{16,128}$/.test(idempotencyKey)) {
+      return errorResponse(res, 422, 'Provide a valid Idempotency-Key.');
+    }
+    const withdrawal = await Withdrawal.findOne({ userId: req.userId, idempotencyKey }).lean();
+    if (!withdrawal) return errorResponse(res, 404, 'Withdrawal not found.');
+    res.json({ withdrawal: withdrawalView(withdrawal) });
+  });
+
   app.get('/api/withdrawals/:id', async (req, res) => {
     if (!mongoose.isObjectIdOrHexString(req.params.id)) return errorResponse(res, 404, 'Withdrawal not found.');
     const withdrawal = await Withdrawal.findOne({ _id: req.params.id, userId: req.userId }).lean();
@@ -119,7 +141,7 @@ export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = f
   });
 
   const json = express.json({ limit: '4kb', inflate: false });
-  app.patch('/api/admin/withdrawals/:id', (req, res, next) => {
+  app.use('/api/admin', (req, res, next) => {
     if (!reviewerToken) return errorResponse(res, 404, 'Endpoint not found.');
     const token = bearer(req);
     const digest = value => createHash('sha256').update(value).digest();
@@ -127,7 +149,15 @@ export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = f
       return errorResponse(res, 403, 'Reviewer access required.');
     }
     next();
-  }, json, async (req, res) => {
+  });
+
+  app.post('/api/admin/wallet/:userId/adjustments', json, async (req, res) => {
+    if (!mongoose.isObjectIdOrHexString(req.params.userId)) return errorResponse(res, 404, 'Wallet not found.');
+    const result = await adjustWallet(req.params.userId, req.body);
+    res.status(result.replayed ? 200 : 201).json(result);
+  });
+
+  app.patch('/api/admin/withdrawals/:id', json, async (req, res) => {
     if (!mongoose.isObjectIdOrHexString(req.params.id)) return errorResponse(res, 404, 'Withdrawal not found.');
     res.json({ withdrawal: await reviewWithdrawal(req.params.id, req.body) });
   });
@@ -138,7 +168,7 @@ export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = f
       return res.status(error.status).json({ code: error.code, error: error.message });
     }
     if (['entity.parse.failed', 'entity.too.large', 'encoding.unsupported', 'charset.unsupported'].includes(error.type)) {
-      return errorResponse(res, error.status, 'Send a valid JSON withdrawal request.');
+      return errorResponse(res, error.status, 'Send a valid JSON request.');
     }
     console.error('API request failed', error.name, error.code);
     return errorResponse(res, 500, 'Wallet request failed.');

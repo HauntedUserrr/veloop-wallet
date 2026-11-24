@@ -164,3 +164,54 @@ test('rolls back the balance and ledger when saving the pending request fails', 
   assert.equal(await Ledger.countDocuments({ userId: session.user.id, type: 'DEBIT' }), 0);
   assert.equal(await Withdrawal.countDocuments({ userId: session.user.id }), 0);
 });
+
+test('checks both quote values and recovers the original receipt by key', async () => {
+  const session = (await request(createApp({
+    jwtSecret: payoutKey.toString('hex'), payoutKey, demoEnabled: true,
+  })).post('/api/auth/demo').expect(201)).body;
+  const instance = request(createApp({ jwtSecret: payoutKey.toString('hex'), payoutKey }));
+  const key = randomUUID();
+  const send = quotedAmountPaise => instance.post('/api/withdrawals')
+    .auth(session.token, { type: 'bearer' }).set('Idempotency-Key', key)
+    .send({ ...details, quotedAmountPaise });
+  const rejected = await send(5000).expect(409);
+  assert.equal(rejected.body.code, 'QUOTE_CHANGED');
+  assert.equal(await balance(session), 25000);
+
+  const committed = await send(10000).expect(201);
+  const receipt = await instance.get('/api/withdrawals/attempt')
+    .auth(session.token, { type: 'bearer' }).set('Idempotency-Key', key).expect(200);
+  assert.equal(receipt.body.withdrawal.id, committed.body.withdrawal.id);
+  await send(10000).expect(200);
+  assert.equal(await balance(session), 5500);
+});
+
+test('restricts adjustments to the reviewer and records a credit and debit once', async () => {
+  const instance = request(createApp({
+    jwtSecret: payoutKey.toString('hex'), payoutKey, reviewerToken, demoEnabled: true,
+  }));
+  const session = (await instance.post('/api/auth/demo').expect(201)).body;
+  const adjust = token => instance.post('/api/admin/wallet/' + session.user.id + '/adjustments')
+    .auth(token, { type: 'bearer' });
+  const entry = { adjustmentId: 'test-adjustment-1', type: 'CREDIT', currency: 'ves', amount: 500, description: 'Test credit' };
+  await adjust(session.token).send(entry).expect(403);
+  await adjust(reviewerToken).send(entry).expect(201);
+  await adjust(reviewerToken).send(entry).expect(200);
+  assert.equal(await balance(session), 25500);
+  await adjust(reviewerToken).send({ ...entry, amount: 1000 }).expect(409);
+  await adjust(reviewerToken).send({
+    ...entry, adjustmentId: 'test-adjustment-2', type: 'DEBIT', description: 'Test debit',
+  }).expect(201);
+  assert.equal(await balance(session), 25000);
+  assert.equal(await Ledger.countDocuments({ userId: session.user.id, actor: 'review-service' }), 2);
+});
+
+test('returns CORS headers only for the configured frontend', async () => {
+  const origin = 'https://wallet.example';
+  const instance = request(createApp({ jwtSecret: reviewerToken, payoutKey, clientOrigin: origin }));
+  const allowed = await instance.options('/api/withdrawals').set('Origin', origin)
+    .set('Access-Control-Request-Method', 'POST').expect(204);
+  assert.equal(allowed.headers['access-control-allow-origin'], origin);
+  const other = await instance.get('/api/health').set('Origin', 'https://other.example').expect(200);
+  assert.equal(other.headers['access-control-allow-origin'], undefined);
+});

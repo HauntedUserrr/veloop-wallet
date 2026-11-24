@@ -11,7 +11,9 @@ Local base URL is `http://127.0.0.1:4001/api`. Demo mode uses sample credits. Th
 | `GET /payout/options` | Bearer token | None | `200` with available options, their costs and payout amounts in paise |
 | `POST /withdrawals` | Bearer token | `Idempotency-Key` header and JSON body | `201` with the new pending withdrawal, or `200` when replaying the same request |
 | `GET /withdrawals` | Bearer token | Optional `page` and `limit` | `200` with the caller’s withdrawal history |
+| `GET /withdrawals/attempt` | Bearer token | Original `Idempotency-Key` | `200` with a committed receipt, or `404` when absent |
 | `GET /withdrawals/:id` | Bearer token | Withdrawal ID | `200` with the caller’s withdrawal or `404` |
+| `POST /admin/wallet/:userId/adjustments` | Reviewer bearer token | Stable `adjustmentId`, `type`, `currency`, integer `amount`, and `description` | `201` with the ledger entry, or `200` for an exact retry |
 | `PATCH /admin/withdrawals/:id` | Reviewer bearer token | `status` and a `reason` for rejection or cancellation | `200` with the updated withdrawal |
 
 ## Review
@@ -28,11 +30,12 @@ Fetch the catalog and choose `upi_100`. Send a new UUID as the `Idempotency-Key`
 {
   "optionId": "upi_100",
   "upiId": "review@sample",
-  "quotedCost": 19500
+  "quotedCost": 19500,
+  "quotedAmountPaise": 10000
 }
 ```
 
-The server gets the debit and payout amounts from the catalog. An optional `quotedCost` checks that the amount displayed to the user is still current. The withdrawal should be `PENDING`, the wallet should have 5,500 VEs, and the ledger should contain a 19,500 VE debit linked to the withdrawal. Repeat the same body and key to verify a replay.
+The server gets the debit and payout amounts from the catalog. Optional `quotedCost` and `quotedAmountPaise` check that the displayed quote is still current. After an interrupted response, check the original key before retrying the same request. A missing receipt can mean the first request is still in flight. The withdrawal should be `PENDING`, the wallet should have 5,500 VEs, and the ledger should contain a 19,500 VE debit linked to the withdrawal. Repeat the same body and key to verify a replay.
 
 | Status | Example |
 | --- | --- |

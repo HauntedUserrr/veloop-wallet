@@ -18,6 +18,8 @@ const wallet = new mongoose.Schema({
 const entry = new mongoose.Schema({
   userId: { type: ObjectId, ref: 'User', required: true },
   withdrawalId: { type: ObjectId, ref: 'Withdrawal' },
+  adjustmentId: String,
+  actor: String,
   currency: { type: String, enum: currencies, required: true },
   type: { type: String, enum: ['CREDIT', 'DEBIT'], required: true },
   amount: { type: Number, required: true, min: 1, validate: Number.isSafeInteger },
@@ -27,6 +29,7 @@ const entry = new mongoose.Schema({
   description: { type: String, required: true },
 }, { timestamps: { createdAt: true, updatedAt: false } });
 entry.index({ userId: 1, createdAt: -1, _id: -1 });
+entry.index({ userId: 1, adjustmentId: 1 }, { unique: true, partialFilterExpression: { adjustmentId: { $type: 'string' } } });
 
 const positiveInteger = { type: Number, required: true, min: 1, validate: Number.isSafeInteger };
 

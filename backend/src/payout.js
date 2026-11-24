@@ -37,16 +37,16 @@ function requestDetails(body, key) {
     throw new PayoutError(422, 'INVALID_IDEMPOTENCY_KEY', 'Provide an Idempotency-Key of 16 to 128 letters, digits, hyphens or underscores.');
   }
   if (!body || typeof body !== 'object' || Array.isArray(body)
-      || Object.keys(body).some(field => !['optionId', 'upiId', 'quotedCost'].includes(field))
+      || Object.keys(body).some(field => !['optionId', 'upiId', 'quotedCost', 'quotedAmountPaise'].includes(field))
       || typeof body.optionId !== 'string' || !/^[a-z0-9_]{1,64}$/.test(body.optionId)
-      || (body.quotedCost !== undefined && (!Number.isSafeInteger(body.quotedCost) || body.quotedCost < 1))) {
-    throw new PayoutError(422, 'INVALID_WITHDRAWAL', 'Provide optionId and upiId, with an optional quotedCost.');
+      || ['quotedCost', 'quotedAmountPaise'].some(field => body[field] !== undefined && (!Number.isSafeInteger(body[field]) || body[field] < 1))) {
+    throw new PayoutError(422, 'INVALID_WITHDRAWAL', 'Provide optionId and upiId, with optional quote values.');
   }
   const upiId = typeof body.upiId === 'string' ? body.upiId.trim().toLowerCase() : '';
   if (!/^[a-z0-9][a-z0-9._-]{1,127}@[a-z0-9][a-z0-9.-]{1,63}$/.test(upiId)) {
     throw new PayoutError(422, 'INVALID_UPI_ID', 'Enter a UPI ID in the form name@provider.');
   }
-  return { optionId: body.optionId, upiId, quotedCost: body.quotedCost };
+  return { optionId: body.optionId, upiId, quotedCost: body.quotedCost, quotedAmountPaise: body.quotedAmountPaise };
 }
 
 function encryptDestination(upiId, key, id) {
@@ -72,9 +72,10 @@ function existingWithdrawal(record, fingerprint) {
 }
 
 export async function submitWithdrawal(userId, body, idempotencyKey, encryptionKey) {
-  const { optionId, upiId, quotedCost } = requestDetails(body, idempotencyKey);
-  const fingerprint = createHmac('sha256', encryptionKey)
-    .update(JSON.stringify(['withdrawal', optionId, upiId, quotedCost ?? null])).digest('hex');
+  const { optionId, upiId, quotedCost, quotedAmountPaise } = requestDetails(body, idempotencyKey);
+  const quote = ['withdrawal', optionId, upiId, quotedCost ?? null];
+  if (quotedAmountPaise !== undefined) quote.push(quotedAmountPaise);
+  const fingerprint = createHmac('sha256', encryptionKey).update(JSON.stringify(quote)).digest('hex');
   const ownerAndKey = { userId, idempotencyKey };
 
   try {
@@ -85,8 +86,9 @@ export async function submitWithdrawal(userId, body, idempotencyKey, encryptionK
       const option = await PayoutOption.findOne({ _id: optionId, method: 'upi', active: true }).session(session);
       if (!option) throw new PayoutError(422, 'OPTION_UNAVAILABLE', 'This payout option is unavailable.');
       const { currency, cost, amountPaise, method } = option;
-      if (quotedCost !== undefined && quotedCost !== cost) {
-        throw new PayoutError(409, 'QUOTE_CHANGED', 'The payout cost changed. Refresh the catalog and review the amount.');
+      if ((quotedCost !== undefined && quotedCost !== cost)
+          || (quotedAmountPaise !== undefined && quotedAmountPaise !== amountPaise)) {
+        throw new PayoutError(409, 'QUOTE_CHANGED', 'The payout quote changed. Refresh the catalog and review the amount.');
       }
 
       const balancePath = `balances.${currency}`;

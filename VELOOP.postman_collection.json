@@ -103,7 +103,7 @@
         "url": "{{baseUrl}}/api/withdrawals",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"optionId\": \"upi_100\",\n  \"upiId\": \"review@sample\",\n  \"quotedCost\": 19500\n}",
+          "raw": "{\n  \"optionId\": \"upi_100\",\n  \"upiId\": \"review@sample\",\n  \"quotedCost\": 19500,\n  \"quotedAmountPaise\": 10000\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -149,7 +149,7 @@
         "url": "{{baseUrl}}/api/withdrawals",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"optionId\": \"upi_100\",\n  \"upiId\": \"review@sample\",\n  \"quotedCost\": 19500\n}",
+          "raw": "{\n  \"optionId\": \"upi_100\",\n  \"upiId\": \"review@sample\",\n  \"quotedCost\": 19500,\n  \"quotedAmountPaise\": 10000\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -273,6 +273,19 @@
           }
         }
       ]
+    },
+    {
+      "name": "Recover the receipt",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Idempotency-Key",
+            "value": "{{withdrawalKey}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/withdrawals/attempt"
+      }
     }
   ]
 }
