@@ -136,7 +136,9 @@ const reviewTransitions = {
 export async function reviewWithdrawal(id, body) {
   const { status, reason } = body ?? {};
   const refund = status === 'REJECTED' || status === 'CANCELLED';
-  if (!['PROCESSING', 'APPROVED', 'REJECTED', 'CANCELLED'].includes(status)
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+      || Object.keys(body).some(field => !['status', 'reason'].includes(field))
+      || !['PROCESSING', 'APPROVED', 'REJECTED', 'CANCELLED'].includes(status)
       || (refund && (typeof reason !== 'string' || !reason.trim() || reason.length > 200))) {
     throw new PayoutError(422, 'INVALID_REVIEW', 'Provide a valid status and a reason for rejection or cancellation.');
   }

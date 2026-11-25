@@ -29,6 +29,7 @@ const entry = new mongoose.Schema({
   description: { type: String, required: true },
 }, { timestamps: { createdAt: true, updatedAt: false } });
 entry.index({ userId: 1, createdAt: -1, _id: -1 });
+entry.index({ createdAt: -1, _id: -1 });
 entry.index({ userId: 1, adjustmentId: 1 }, { unique: true, partialFilterExpression: { adjustmentId: { $type: 'string' } } });
 
 const positiveInteger = { type: Number, required: true, min: 1, validate: Number.isSafeInteger };
@@ -59,6 +60,8 @@ const withdrawal = new mongoose.Schema({
 }, { timestamps: true });
 withdrawal.index({ userId: 1, idempotencyKey: 1 }, { unique: true });
 withdrawal.index({ userId: 1, createdAt: -1, _id: -1 });
+withdrawal.index({ createdAt: -1, _id: -1 });
+withdrawal.index({ status: 1, createdAt: -1, _id: -1 });
 
 const withdrawalEvent = new mongoose.Schema({
   withdrawalId: { type: ObjectId, ref: 'Withdrawal', required: true },

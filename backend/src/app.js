@@ -1,16 +1,17 @@
 import express from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { rateLimit } from 'express-rate-limit';
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import helmet from 'helmet';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { User, Wallet, Withdrawal } from './models.js';
 import { PayoutError, payoutOptions, reviewWithdrawal, submitWithdrawal, withdrawalView } from './payout.js';
 import { adjustWallet } from './adjustment.js';
-import { createDemoWallet, listTransactions } from './wallet.js';
+import { createDemoWallet, listTransactions, listWithdrawals, walletSnapshot } from './wallet.js';
 
 const issuer = 'veloop-wallet';
 const audience = 'wallet-api';
+const reviewerAudience = 'wallet-review';
 
 function errorResponse(res, status, message) {
   return res.status(status).json({ error: message });
@@ -24,7 +25,14 @@ function readInteger(value, fallback, max) {
 }
 
 function bearer(req) {
-  return req.get('Authorization')?.match(/^Bearer ([^\s]+)$/i)?.[1];
+  return req.get('Authorization')?.match(/^Bearer ([^\s]{1,2048})$/i)?.[1];
+}
+
+function pageQuery(req, extra = []) {
+  const page = readInteger(req.query.page, 1, 500);
+  const limit = readInteger(req.query.limit, 20, 50);
+  if (!page || !limit || Object.keys(req.query).some(key => !['page', 'limit', ...extra].includes(key))) return null;
+  return { page, limit };
 }
 
 export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = false, clientOrigin, trustProxy = 0 }) {
@@ -39,7 +47,7 @@ export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = f
     if (clientOrigin && origin === clientOrigin) {
       res.set('Access-Control-Allow-Origin', origin);
       if (req.method === 'OPTIONS') {
-        res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
         res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, Idempotency-Key');
         return res.sendStatus(204);
       }
@@ -97,6 +105,12 @@ export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = f
     res.json(await listTransactions(req.userId, page, limit));
   });
 
+  app.get('/api/wallet/snapshot', async (req, res) => {
+    const query = pageQuery(req);
+    if (!query) return errorResponse(res, 422, 'Use page 1–500 and limit 1–50.');
+    res.json(await walletSnapshot(req.userId, query.page, query.limit));
+  });
+
   app.get('/api/payout/options', async (_req, res) => {
     res.json({ options: await payoutOptions() });
   });
@@ -118,9 +132,7 @@ export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = f
     if (!page || !limit || Object.keys(req.query).some(key => key !== 'page' && key !== 'limit')) {
       return errorResponse(res, 422, 'Use page 1–500 and limit 1–50.');
     }
-    const records = await Withdrawal.find({ userId: req.userId }).sort({ createdAt: -1, _id: -1 })
-      .skip((page - 1) * limit).limit(limit + 1).lean();
-    res.json({ records: records.slice(0, limit).map(withdrawalView), page, limit, hasMore: page < 500 && records.length > limit });
+    res.json(await listWithdrawals({ userId: req.userId }, page, limit));
   });
 
   app.get('/api/withdrawals/attempt', async (req, res) => {
@@ -141,23 +153,66 @@ export function createApp({ jwtSecret, payoutKey, reviewerToken, demoEnabled = f
   });
 
   const json = express.json({ limit: '4kb', inflate: false });
+  const reviewerDigest = reviewerToken && createHash('sha256').update(reviewerToken).digest();
+  const matchesReviewerToken = token => token && timingSafeEqual(createHash('sha256').update(token).digest(), reviewerDigest);
+  const reviewLimit = rateLimit({
+    limit: 120, windowMs: 60_000, standardHeaders: 'draft-8', legacyHeaders: false,
+    keyGenerator: req => ipKeyGenerator(req.ip ?? req.socket.remoteAddress ?? ''),
+    handler: (_req, res) => errorResponse(res, 429, 'Too many reviewer requests. Try again shortly.'),
+  });
+  const loginLimit = rateLimit({
+    limit: 8, windowMs: 15 * 60_000, standardHeaders: 'draft-8', legacyHeaders: false,
+    keyGenerator: req => ipKeyGenerator(req.ip ?? req.socket.remoteAddress ?? ''),
+    skipSuccessfulRequests: true,
+    handler: (_req, res) => errorResponse(res, 429, 'Too many sign-in attempts. Try again later.'),
+  });
+  app.post('/api/admin/session', loginLimit, (req, res) => {
+    if (!reviewerDigest) return errorResponse(res, 404, 'Endpoint not found.');
+    if (!matchesReviewerToken(bearer(req))) return errorResponse(res, 403, 'Reviewer access required.');
+    const token = jwt.sign({}, reviewerDigest, {
+      subject: 'review-service', algorithm: 'HS256', issuer, audience: reviewerAudience, expiresIn: '20m',
+    });
+    res.json({ token });
+  });
   app.use('/api/admin', (req, res, next) => {
-    if (!reviewerToken) return errorResponse(res, 404, 'Endpoint not found.');
+    if (!reviewerDigest) return errorResponse(res, 404, 'Endpoint not found.');
     const token = bearer(req);
-    const digest = value => createHash('sha256').update(value).digest();
-    if (!token || !timingSafeEqual(digest(token), digest(reviewerToken))) {
+    if (matchesReviewerToken(token)) return next();
+    try {
+      jwt.verify(token, reviewerDigest, {
+        algorithms: ['HS256'], issuer, audience: reviewerAudience, subject: 'review-service',
+      });
+    } catch {
       return errorResponse(res, 403, 'Reviewer access required.');
     }
     next();
   });
 
-  app.post('/api/admin/wallet/:userId/adjustments', json, async (req, res) => {
+  app.get('/api/admin/withdrawals', reviewLimit, async (req, res) => {
+    const query = pageQuery(req, ['status']);
+    const { status } = req.query;
+    if (!query || (status !== undefined && !['PENDING', 'PROCESSING', 'APPROVED', 'REJECTED', 'CANCELLED'].includes(status))) {
+      return errorResponse(res, 422, 'Provide a valid status and pagination.');
+    }
+    res.json(await listWithdrawals(status ? { status } : {}, query.page, query.limit, null, true));
+  });
+
+  app.get('/api/admin/transactions', reviewLimit, async (req, res) => {
+    const query = pageQuery(req, ['userId']);
+    const { userId } = req.query;
+    if (!query || (userId !== undefined && (typeof userId !== 'string' || !mongoose.isObjectIdOrHexString(userId)))) {
+      return errorResponse(res, 422, 'Provide a valid wallet ID and pagination.');
+    }
+    res.json(await listTransactions(userId, query.page, query.limit));
+  });
+
+  app.post('/api/admin/wallet/:userId/adjustments', reviewLimit, json, async (req, res) => {
     if (!mongoose.isObjectIdOrHexString(req.params.userId)) return errorResponse(res, 404, 'Wallet not found.');
     const result = await adjustWallet(req.params.userId, req.body);
     res.status(result.replayed ? 200 : 201).json(result);
   });
 
-  app.patch('/api/admin/withdrawals/:id', json, async (req, res) => {
+  app.patch('/api/admin/withdrawals/:id', reviewLimit, json, async (req, res) => {
     if (!mongoose.isObjectIdOrHexString(req.params.id)) return errorResponse(res, 404, 'Withdrawal not found.');
     res.json({ withdrawal: await reviewWithdrawal(req.params.id, req.body) });
   });

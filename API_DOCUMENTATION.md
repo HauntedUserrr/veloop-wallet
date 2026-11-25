@@ -8,11 +8,15 @@ Local base URL is `http://127.0.0.1:4001/api`. Demo mode uses sample credits. Th
 | `POST /auth/demo` | Demo mode | No body | `201` with a two-hour bearer token and demo user |
 | `GET /wallet` | Bearer token | No query parameters | `200` with `wallet.balances` and `updatedAt` |
 | `GET /wallet/transactions` | Bearer token | Optional `page` (1–500) and `limit` (1–50) | `200` with newest-first ledger `records`, `page`, `limit` and `hasMore` |
+| `GET /wallet/snapshot` | Bearer token | Optional `page` and `limit` for ledger history | `200` with wallet balances, a page of ledger entries with status, and recent withdrawals from one database snapshot |
 | `GET /payout/options` | Bearer token | None | `200` with available options, their costs and payout amounts in paise |
 | `POST /withdrawals` | Bearer token | `Idempotency-Key` header and JSON body | `201` with the new pending withdrawal, or `200` when replaying the same request |
 | `GET /withdrawals` | Bearer token | Optional `page` and `limit` | `200` with the caller’s withdrawal history |
 | `GET /withdrawals/attempt` | Bearer token | Original `Idempotency-Key` | `200` with a committed receipt, or `404` when absent |
 | `GET /withdrawals/:id` | Bearer token | Withdrawal ID | `200` with the caller’s withdrawal or `404` |
+| `POST /admin/session` | Reviewer access code as bearer | No body | `200` with a 20-minute reviewer session token |
+| `GET /admin/withdrawals` | Reviewer bearer token | Optional `status`, `page`, and `limit` | `200` with withdrawal records and wallet IDs |
+| `GET /admin/transactions` | Reviewer bearer token | Optional `userId`, `page`, and `limit` | `200` with ledger records across the selected wallets |
 | `POST /admin/wallet/:userId/adjustments` | Reviewer bearer token | Stable `adjustmentId`, `type`, `currency`, integer `amount`, and `description` | `201` with the ledger entry, or `200` for an exact retry |
 | `PATCH /admin/withdrawals/:id` | Reviewer bearer token | `status` and a `reason` for rejection or cancellation | `200` with the updated withdrawal |
 

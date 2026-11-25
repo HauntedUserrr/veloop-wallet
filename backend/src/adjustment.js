@@ -4,7 +4,9 @@ import { PayoutError } from './payout.js';
 
 export async function adjustWallet(userId, input) {
   const { adjustmentId, currency, type, amount, description } = input ?? {};
-  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(typeof adjustmentId === 'string' ? adjustmentId : '')
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || Object.keys(input).some(field => !['adjustmentId', 'currency', 'type', 'amount', 'description'].includes(field))
+    || !/^[a-zA-Z0-9_-]{8,80}$/.test(typeof adjustmentId === 'string' ? adjustmentId : '')
     || !currencies.includes(currency) || !['CREDIT', 'DEBIT'].includes(type)
     || !Number.isSafeInteger(amount) || amount < 1
     || typeof description !== 'string' || !description.trim() || description.length > 200) {

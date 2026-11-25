@@ -214,4 +214,49 @@ test('returns CORS headers only for the configured frontend', async () => {
   assert.equal(allowed.headers['access-control-allow-origin'], origin);
   const other = await instance.get('/api/health').set('Origin', 'https://other.example').expect(200);
   assert.equal(other.headers['access-control-allow-origin'], undefined);
+  const review = await instance.options('/api/admin/withdrawals/example').set('Origin', origin)
+    .set('Access-Control-Request-Method', 'PATCH').expect(204);
+  assert.match(review.headers['access-control-allow-methods'], /PATCH/);
+});
+
+test('reviewer sessions authorize dashboard reads and an atomic refund without exposing UPI data', async () => {
+  const instance = request(createApp({
+    jwtSecret: reviewerToken, payoutKey, reviewerToken, demoEnabled: true,
+  }));
+  const { body: owner } = await instance.post('/api/auth/demo').expect(201);
+  const { body: other } = await instance.post('/api/auth/demo').expect(201);
+  const ownerAuth = route => route.auth(owner.token, { type: 'bearer' });
+  const snapshot = () => ownerAuth(instance.get('/api/wallet/snapshot')).expect(200);
+
+  await ownerAuth(instance.post('/api/admin/session')).expect(403);
+  await ownerAuth(instance.get('/api/admin/withdrawals')).expect(403);
+  const { body: reviewer } = await instance.post('/api/admin/session').auth(reviewerToken, { type: 'bearer' }).expect(200);
+  const reviewerAuth = route => route.auth(reviewer.token, { type: 'bearer' });
+  await reviewerAuth(instance.get('/api/wallet/snapshot')).expect(401);
+
+  const { body: { withdrawal } } = await ownerAuth(instance.post('/api/withdrawals'))
+    .set('Idempotency-Key', randomUUID()).send(details).expect(201);
+  const { body: { records } } = await reviewerAuth(instance.get('/api/admin/withdrawals?status=PENDING&limit=50')).expect(200);
+  const queued = records.find(item => item.id === withdrawal.id);
+  assert.equal(queued.userId, owner.user.id);
+  assert.equal(queued.encryptedDestination, undefined);
+  assert.equal(queued.upiId, undefined);
+  assert.equal(queued.requestFingerprint, undefined);
+  await instance.get('/api/withdrawals/' + withdrawal.id).auth(other.token, { type: 'bearer' }).expect(404);
+
+  const pending = (await snapshot()).body;
+  assert.equal(pending.wallet.balances.ves, 5500);
+  assert.equal(pending.history.records.find(entry => entry._id === withdrawal.ledgerId).status, 'PENDING');
+  const reject = () => reviewerAuth(instance.patch('/api/admin/withdrawals/' + withdrawal.id))
+    .send({ status: 'REJECTED', reason: 'Demo refund' }).expect(200);
+  const outcomes = await Promise.all([reject(), reject()]);
+  assert.equal(outcomes[0].body.withdrawal.refundLedgerId, outcomes[1].body.withdrawal.refundLedgerId);
+
+  const refunded = (await snapshot()).body;
+  assert.equal(refunded.wallet.balances.ves, 25000);
+  assert.equal(refunded.withdrawals.records[0].status, 'REJECTED');
+  assert.equal(refunded.history.records.find(entry => entry._id === withdrawal.ledgerId).status, 'REJECTED');
+  assert.equal(refunded.history.records.filter(entry => entry.source === 'WITHDRAWAL_REVERSAL').length, 1);
+  const { body: monitor } = await reviewerAuth(instance.get('/api/admin/transactions').query({ userId: owner.user.id })).expect(200);
+  assert.ok(monitor.records.every(entry => entry.userId === owner.user.id));
 });

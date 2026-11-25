@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
-import { currencies, Ledger, User, Wallet } from './models.js';
+import { currencies, Ledger, User, Wallet, Withdrawal } from './models.js';
+import { PayoutError, withdrawalView } from './payout.js';
 
 const openingCredits = [
   ['ves', 22_800, 'BONUS', 'Opening demo credits'],
@@ -31,11 +32,40 @@ export function createDemoWallet() {
   }, { writeConcern: { w: 'majority' } });
 }
 
-export async function listTransactions(userId, page, limit) {
-  const records = await Ledger.find({ userId })
+export async function listTransactions(userId, page, limit, session = null) {
+  const records = await Ledger.find(userId ? { userId } : {})
     .sort({ createdAt: -1, _id: -1 })
     .skip((page - 1) * limit)
     .limit(limit + 1)
-    .lean();
+    .session(session).lean();
   return { records: records.slice(0, limit), page, limit, hasMore: page < 500 && records.length > limit };
+}
+
+export async function listWithdrawals(filter, page, limit, session = null, admin = false) {
+  const records = await Withdrawal.find(filter).sort({ createdAt: -1, _id: -1 })
+    .skip((page - 1) * limit).limit(limit + 1).session(session).lean();
+  return {
+    records: records.slice(0, limit).map(record => ({
+      ...withdrawalView(record),
+      ...(admin && { userId: String(record.userId) }),
+    })),
+    page, limit, hasMore: page < 500 && records.length > limit,
+  };
+}
+
+export function walletSnapshot(userId, page, limit) {
+  return mongoose.connection.transaction(async session => {
+    const wallet = await Wallet.findById(userId).select('balances updatedAt -_id').session(session).lean();
+    if (!wallet) throw new PayoutError(404, 'WALLET_NOT_FOUND', 'Wallet not found.');
+    const history = await listTransactions(userId, page, limit, session);
+    const withdrawals = await listWithdrawals({ userId }, 1, 20, session);
+    const linkedIds = history.records.flatMap(entry => entry.withdrawalId ? [entry.withdrawalId] : []);
+    const linked = await Withdrawal.find({ userId, _id: { $in: linkedIds } })
+      .select('status').session(session).lean();
+    const statuses = new Map(linked.map(record => [String(record._id), record.status]));
+    for (const entry of history.records) {
+      entry.status = entry.source === 'WITHDRAWAL' ? statuses.get(String(entry.withdrawalId)) ?? 'POSTED' : 'POSTED';
+    }
+    return { wallet, history, withdrawals };
+  }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
 }
