@@ -38,7 +38,17 @@ export async function listTransactions(userId, page, limit, session = null) {
     .skip((page - 1) * limit)
     .limit(limit + 1)
     .session(session).lean();
-  return { records: records.slice(0, limit), page, limit, hasMore: page < 500 && records.length > limit };
+  const visible = records.slice(0, limit);
+  const linkedIds = visible.filter(entry => entry.source === 'WITHDRAWAL').map(entry => entry.withdrawalId);
+  const linked = linkedIds.length ? await Withdrawal.find({ _id: { $in: linkedIds } })
+    .select('status userId').session(session).lean() : [];
+  const statuses = new Map(linked.map(record => [String(record._id), record]));
+  for (const entry of visible) {
+    const withdrawal = statuses.get(String(entry.withdrawalId));
+    entry.status = entry.source === 'WITHDRAWAL' && withdrawal && String(withdrawal.userId) === String(entry.userId)
+      ? withdrawal.status : 'POSTED';
+  }
+  return { records: visible, page, limit, hasMore: page < 500 && records.length > limit };
 }
 
 export async function listWithdrawals(filter, page, limit, session = null, admin = false) {
@@ -59,13 +69,6 @@ export function walletSnapshot(userId, page, limit) {
     if (!wallet) throw new PayoutError(404, 'WALLET_NOT_FOUND', 'Wallet not found.');
     const history = await listTransactions(userId, page, limit, session);
     const withdrawals = await listWithdrawals({ userId }, 1, 20, session);
-    const linkedIds = history.records.flatMap(entry => entry.withdrawalId ? [entry.withdrawalId] : []);
-    const linked = await Withdrawal.find({ userId, _id: { $in: linkedIds } })
-      .select('status').session(session).lean();
-    const statuses = new Map(linked.map(record => [String(record._id), record.status]));
-    for (const entry of history.records) {
-      entry.status = entry.source === 'WITHDRAWAL' ? statuses.get(String(entry.withdrawalId)) ?? 'POSTED' : 'POSTED';
-    }
     return { wallet, history, withdrawals };
   }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
 }

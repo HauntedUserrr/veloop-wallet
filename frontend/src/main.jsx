@@ -10,12 +10,21 @@ const pendingKey = 'veloop-rebuild-withdrawal';
 const route = location.pathname.replace(/\/$/, '') || '/wallet';
 const upiPattern = /^[a-z0-9][a-z0-9._-]{1,127}@[a-z0-9][a-z0-9.-]{1,63}$/;
 
-function Wallet({ session }) {
+function SessionExpired({ onExit }) {
+  return <section className="panel sign-in">
+    <h1>Demo session expired</h1>
+    <p>Start a fresh demo wallet to continue.</p>
+    <button className="primary" onClick={onExit}>Return to demo sign-in</button>
+  </section>;
+}
+
+function Wallet({ session, onExit }) {
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
   const { data, loading, error } = useResource('/wallet/snapshot?page=' + page + '&limit=8', session.token, revision, true);
+  if (error?.status === 401) return <SessionExpired onExit={onExit} />;
   return <>
-    <div className="page-head"><div><h1>Your wallet</h1><p>Balances and transaction history</p></div>
+    <div className="page-head"><div><h1>Your wallet</h1><p>Track your rewards and wallet activity.</p></div>
       <button onClick={() => setRevision(value => value + 1)} disabled={loading}>Refresh</button></div>
     {error && <Notice error>{error.message}</Notice>}
     {loading && <Notice>Loading wallet…</Notice>}
@@ -32,16 +41,17 @@ function Wallet({ session }) {
         </section>
       </div>
       <section className="panel" aria-busy={loading}>
-        <h2>Transaction history</h2>
+        <div className="section-head"><h2>Transaction history</h2>
+          <details className="wallet-reference"><summary>Wallet reference</summary><code>{session.user.id}</code></details>
+        </div>
         <Ledger records={data.history.records} />
         <Pagination data={data.history} setPage={setPage} busy={loading} />
-        <details><summary>Wallet reference</summary><code>{session.user.id}</code></details>
       </section>
     </>}
   </>;
 }
 
-function Payout({ session }) {
+function Payout({ session, onExit }) {
   const [selection, setSelection] = useState('');
   const [upiId, setUpiId] = useState('');
   const [confirmation, setConfirmation] = useState(null);
@@ -52,6 +62,7 @@ function Payout({ session }) {
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const lock = useRef(false);
+  const upiInput = useRef(null);
   const snapshot = useResource('/wallet/snapshot?limit=1', session.token, revision, true);
   const catalog = useResource('/payout/options', session.token, revision);
   const option = pending?.option ?? catalog.data?.options.find(item => item.id === selection);
@@ -121,6 +132,7 @@ function Payout({ session }) {
     const destination = upiId.trim().toLowerCase();
     if (!upiPattern.test(destination)) {
       setFailure('Enter a UPI ID in the form name@provider.');
+      upiInput.current?.focus();
       return;
     }
     setFailure('');
@@ -128,6 +140,7 @@ function Payout({ session }) {
   }
 
   const currentReceipt = snapshot.data?.withdrawals.records.find(item => item.id === receipt?.id) ?? receipt;
+  if (snapshot.error?.status === 401 || catalog.error?.status === 401) return <SessionExpired onExit={onExit} />;
   return <>
     <div className="page-head"><div><h1>Withdraw rewards</h1><p>Simulated UPI payouts using demo credits.</p></div>
       <button onClick={refresh} disabled={snapshot.loading || catalog.loading}>Refresh</button></div>
@@ -147,10 +160,16 @@ function Payout({ session }) {
             {pending && !catalog.data?.options.some(item => item.id === pending.option.id) &&
               <option value={pending.option.id}>{amount(pending.option)} · {cost(pending.option)}</option>}
           </select></label>
-          <label>UPI ID<input required value={upiId} disabled={busy || !!confirmation} spellCheck={false} autoCapitalize="none"
+          <label>UPI ID<input ref={upiInput} required value={upiId} disabled={busy || !!confirmation} spellCheck={false} autoCapitalize="none"
             autoComplete="off" maxLength={192} placeholder="name@provider" onChange={event => setUpiId(event.target.value)} /></label>
-          <button type="button" disabled={busy || !!confirmation} onClick={() => setUpiId('review@sample')}>Use sample UPI ID</button>
-          {balance !== undefined && option && <p className="field-note">Available {count.format(balance)} {currencies[option.currency]}</p>}
+          <button className="text-button" type="button" disabled={busy || !!confirmation}
+            onClick={() => setUpiId('review@sample')}>Use sample UPI ID</button>
+          {option && Number.isFinite(balance) && <dl className="quote-summary">
+            <div><dt>Available balance</dt><dd>{count.format(balance)} {currencies[option.currency]}</dd></div>
+            <div><dt>Withdrawal cost</dt><dd>{cost(option)}</dd></div>
+            {!insufficient && !pending && <div><dt>Balance after withdrawal</dt>
+              <dd>{count.format(balance - option.cost)} {currencies[option.currency]}</dd></div>}
+          </dl>}
           {insufficient && !pending && <Notice error>Insufficient credits for this amount.</Notice>}
           <button className="primary" disabled={!option || !!confirmation || busy || (!pending && (!ready || insufficient))}>
             {pending ? 'Review retry' : 'Review withdrawal'}
@@ -159,8 +178,8 @@ function Payout({ session }) {
         {confirmation && <section className="confirmation" aria-label="Confirm withdrawal">
           <h3>Confirm withdrawal</h3>
           <p>Send {amount(confirmation.option)} to <strong>{confirmation.upiId}</strong> using {cost(confirmation.option)}.</p>
-          <div className="row-actions"><button disabled={busy} onClick={() => setConfirmation(null)}>Cancel</button>
-            <button className="primary" disabled={busy} onClick={submit}>{busy ? 'Submitting…' : 'Confirm withdrawal'}</button></div>
+          <div className="row-actions"><button disabled={busy} onClick={() => { setConfirmation(null); requestAnimationFrame(() => upiInput.current?.focus()); }}>Cancel</button>
+            <button autoFocus className="primary" disabled={busy} onClick={submit}>{busy ? 'Submitting…' : 'Confirm withdrawal'}</button></div>
         </section>}
       </section>
       <section className="panel"><h2>Recent withdrawals</h2>
@@ -209,12 +228,12 @@ function App() {
       <nav aria-label="Main navigation">
         <a href="/wallet" aria-current={route === '/wallet' ? 'page' : undefined}>Wallet</a>
         <a href="/payout" aria-current={route === '/payout' ? 'page' : undefined}>Withdraw</a>
-        <a href="/admin" aria-current={route === '/admin' ? 'page' : undefined}>Reviewer</a>
+        <a href="/admin" aria-current={route === '/admin' ? 'page' : undefined}>Admin</a>
       </nav>
       {session && route !== '/admin' && <button className="end-demo" onClick={endDemo}>End demo</button>}
     </div></header>
     <main id="main" className="shell">
-      {route === '/admin' ? <Admin /> : session ? route === '/payout' ? <Payout session={session} /> : <Wallet session={session} /> :
+      {route === '/admin' ? <Admin /> : session ? route === '/payout' ? <Payout session={session} onExit={endDemo} /> : <Wallet session={session} onExit={endDemo} /> :
         <section className="panel sign-in">
           <h1>Rewards wallet</h1>
           <p>Open a demo wallet with 25,000 VEs to view your ledger and try a UPI withdrawal.</p>

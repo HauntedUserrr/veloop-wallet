@@ -139,7 +139,7 @@ export async function reviewWithdrawal(id, body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)
       || Object.keys(body).some(field => !['status', 'reason'].includes(field))
       || !['PROCESSING', 'APPROVED', 'REJECTED', 'CANCELLED'].includes(status)
-      || (refund && (typeof reason !== 'string' || !reason.trim() || reason.length > 200))) {
+      || (refund ? typeof reason !== 'string' || !reason.trim() || reason.length > 200 : reason !== undefined)) {
     throw new PayoutError(422, 'INVALID_REVIEW', 'Provide a valid status and a reason for rejection or cancellation.');
   }
   return mongoose.connection.transaction(async session => {

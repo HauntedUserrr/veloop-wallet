@@ -51,8 +51,9 @@ function Dashboard({ token, signOut }) {
   const [message, setMessage] = useState(null);
   const lock = useRef(false);
   const adjustment = useRef(null);
-  const queue = useResource('/admin/withdrawals?page=' + page + '&limit=8' + (filter ? '&status=' + filter : ''), token, revision);
-  const ledger = useResource('/admin/transactions?page=' + ledgerPage + '&limit=8' + (walletFilter ? '&userId=' + encodeURIComponent(walletFilter) : ''), token, revision);
+  const ledgerHeading = useRef(null);
+  const queue = useResource('/admin/withdrawals?page=' + page + '&limit=8' + (filter ? '&status=' + filter : ''), token, revision, true);
+  const ledger = useResource('/admin/transactions?page=' + ledgerPage + '&limit=8' + (walletFilter ? '&userId=' + encodeURIComponent(walletFilter) : ''), token, revision, true);
   const expired = queue.error?.status === 403 || ledger.error?.status === 403 || message?.status === 403;
 
   async function mutate(action, onSuccess) {
@@ -68,6 +69,13 @@ function Dashboard({ token, signOut }) {
       setMessage({ text: error.message, error: true, status: error.status });
       if (error.status === 409) setRevision(value => value + 1);
     } finally { lock.current = false; setBusy(false); }
+  }
+
+  function viewWallet(userId) {
+    setWalletId(userId);
+    setWalletFilter(userId);
+    setLedgerPage(1);
+    ledgerHeading.current?.focus();
   }
 
   function submitReview(event) {
@@ -123,13 +131,17 @@ function Dashboard({ token, signOut }) {
   }
 
   return <>
-    <div className="page-head"><div><h1>Reviewer dashboard</h1><p>Review withdrawals and inspect wallet activity.</p></div>
-      <button onClick={signOut}>Sign out</button></div>
+    <div className="page-head"><div><h1>Wallet administration</h1><p>Review payouts, inspect ledger entries, and adjust balances.</p></div>
+      <div className="row-actions">
+        <button disabled={queue.loading || ledger.loading} onClick={() => setRevision(value => value + 1)}>Refresh</button>
+        <button onClick={signOut}>Sign out</button>
+      </div>
+    </div>
     {message && <Notice error={message.error}>{message.text}</Notice>}
     {expired ? <Notice error>Reviewer session expired. Sign out and sign in again.</Notice> : <>
       <section className="panel" aria-busy={queue.loading}>
         <div className="section-head"><h2>Withdrawal queue</h2>
-          <label className="inline-field">Status<select value={filter} onChange={event => { setFilter(event.target.value); setPage(1); }}>
+          <label className="inline-field">Status<select value={filter} onChange={event => { setReview(null); setFilter(event.target.value); setPage(1); }}>
             <option value="">All statuses</option>{states.map(state => <option key={state} value={state}>{state.toLowerCase()}</option>)}
           </select></label>
         </div>
@@ -137,7 +149,7 @@ function Dashboard({ token, signOut }) {
         {queue.loading && <Notice>Loading withdrawal requests…</Notice>}
         {queue.data && <>
           {!queue.data.records.length && <p className="empty">No withdrawals match this status.</p>}
-          <ul className="activity-list">{queue.data.records.map(item => <li key={item.id}>
+          <ul className="activity-list admin-queue">{queue.data.records.map(item => <li key={item.id}>
             <div><strong>{amount(item)} via UPI</strong><small>{cost(item)} · {formatDate(item.createdAt)}</small>
               <small>Request <code>{item.id}</code></small><small>Wallet <code>{item.userId}</code></small>
               {item.rejectionReason && <small>{item.rejectionReason}</small>}</div>
@@ -148,21 +160,27 @@ function Dashboard({ token, signOut }) {
                 </button>
                 <button disabled={busy} onClick={() => setReview({ id: item.id, status: 'REJECTED' })}>Reject</button>
               </>}
-              <button disabled={busy} onClick={() => { setWalletId(item.userId); setWalletFilter(item.userId); setLedgerPage(1); }}>View wallet ledger</button>
+              <button disabled={busy} onClick={() => viewWallet(item.userId)}>View wallet ledger</button>
             </div>
+            {review?.id === item.id && <form key={review.status} className="confirmation" onSubmit={submitReview}>
+              <h3>{labels[review.status]}</h3>
+              {review.status === 'REJECTED' && <>
+                <p>Rejecting this request returns {cost(item)} to the wallet.</p>
+                <label>Reason<textarea autoFocus name="reason" required maxLength={200} /></label>
+              </>}
+              <div className="row-actions">
+                <button type="button" disabled={busy} onClick={() => setReview(null)}>Cancel</button>
+                <button autoFocus={review.status !== 'REJECTED'} className="primary" disabled={busy}>
+                  {busy ? 'Saving…' : 'Confirm'}
+                </button>
+              </div>
+            </form>}
           </li>)}</ul>
           <Pagination data={queue.data} setPage={setPage} busy={queue.loading} />
         </>}
-        {review && <form key={review.id + review.status} className="confirmation" onSubmit={submitReview}>
-          <h3>{labels[review.status]}</h3>
-          <p>Request <code>{review.id}</code></p>
-          {review.status === 'REJECTED' && <label>Reason<textarea name="reason" required maxLength={200} /></label>}
-          <div className="row-actions"><button type="button" disabled={busy} onClick={() => setReview(null)}>Cancel</button>
-            <button className="primary" disabled={busy}>{busy ? 'Saving…' : 'Confirm'}</button></div>
-        </form>}
       </section>
       <section className="panel" aria-busy={ledger.loading}>
-        <div className="section-head"><h2>Wallet ledger</h2>
+        <div className="section-head"><h2 ref={ledgerHeading} tabIndex={-1}>Wallet ledger</h2>
           {walletFilter && <button onClick={() => { setWalletFilter(''); setLedgerPage(1); }}>Show all wallets</button>}</div>
         {walletFilter && <p>Wallet <code>{walletFilter}</code></p>}
         {ledger.error && <Notice error>{ledger.error.message} <button onClick={() => setRevision(value => value + 1)}>Retry</button></Notice>}

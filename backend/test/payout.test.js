@@ -247,6 +247,11 @@ test('reviewer sessions authorize dashboard reads and an atomic refund without e
   const pending = (await snapshot()).body;
   assert.equal(pending.wallet.balances.ves, 5500);
   assert.equal(pending.history.records.find(entry => entry._id === withdrawal.ledgerId).status, 'PENDING');
+  const { body: pendingMonitor } = await reviewerAuth(instance.get('/api/admin/transactions')
+    .query({ userId: owner.user.id })).expect(200);
+  assert.equal(pendingMonitor.records.find(entry => entry._id === withdrawal.ledgerId).status, 'PENDING');
+  await reviewerAuth(instance.patch('/api/admin/withdrawals/' + withdrawal.id))
+    .send({ status: 'PROCESSING', reason: { unexpected: true } }).expect(422);
   const reject = () => reviewerAuth(instance.patch('/api/admin/withdrawals/' + withdrawal.id))
     .send({ status: 'REJECTED', reason: 'Demo refund' }).expect(200);
   const outcomes = await Promise.all([reject(), reject()]);
@@ -259,4 +264,8 @@ test('reviewer sessions authorize dashboard reads and an atomic refund without e
   assert.equal(refunded.history.records.filter(entry => entry.source === 'WITHDRAWAL_REVERSAL').length, 1);
   const { body: monitor } = await reviewerAuth(instance.get('/api/admin/transactions').query({ userId: owner.user.id })).expect(200);
   assert.ok(monitor.records.every(entry => entry.userId === owner.user.id));
+  assert.equal(monitor.records.find(entry => entry._id === withdrawal.ledgerId).status, 'REJECTED');
+  assert.equal(monitor.records.find(entry => entry.source === 'WITHDRAWAL_REVERSAL').status, 'POSTED');
+  const { body: history } = await ownerAuth(instance.get('/api/wallet/transactions')).expect(200);
+  assert.equal(history.records.find(entry => entry._id === withdrawal.ledgerId).status, 'REJECTED');
 });
